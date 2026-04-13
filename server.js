@@ -86,7 +86,7 @@ mongoose.connect(process.env.MONGODB_URI)
     console.error('❌ MongoDB connection error:', err);
   });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5000 || process.env.HOS;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 API URL: http://localhost:${PORT}/api`);
