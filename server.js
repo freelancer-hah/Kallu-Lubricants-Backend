@@ -22,6 +22,18 @@ const expenseRoutes = require('./routes/expenseRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const stockRoutes = require('./routes/stockRoutes');
 
+// Add these with other routes
+const cashbookRoutes = require('./routes/cashbookRoutes');
+const customerLedgerRoutes = require('./routes/customerLedgerRoutes');
+const trashRoutes = require('./routes/trashRoutes');
+const bankRoutes = require('./routes/bankRoutes');
+
+// Add after other route declarations
+app.use('/api/cashbook', cashbookRoutes);
+app.use('/api/customer-ledger', customerLedgerRoutes);
+app.use('/api/trash', trashRoutes);
+app.use('/api/banks', bankRoutes);
+
 // Use routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);

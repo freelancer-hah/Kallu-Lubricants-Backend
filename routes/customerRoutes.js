@@ -1,21 +1,29 @@
 const express = require('express');
-const { 
-  getCustomers, 
-  getCustomer, 
-  searchCustomers, 
-  createCustomer, 
-  updateCustomer, 
-  deleteCustomer 
-} = require('../controllers/customerController');
-const { auth } = require('../middleware/auth');
-
 const router = express.Router();
+const {
+  getCustomers,
+  getCustomer,
+  searchCustomers,
+  createCustomer,
+  updateCustomer,
+  deleteCustomer,
+  getCustomerWithLedger,
+  updateOpeningBalance
+} = require('../controllers/customerController');
 
-router.get('/', auth, getCustomers);
-router.get('/search', auth, searchCustomers);
-router.get('/:id', auth, getCustomer);
-router.post('/', auth, createCustomer);
-router.put('/:id', auth, updateCustomer);
-router.delete('/:id', auth, deleteCustomer);
+// Import auth middleware correctly - destructure the object
+const { auth, adminOnly } = require('../middleware/auth');
+
+// All customer routes require authentication
+router.use(auth);
+
+router.get('/', getCustomers);
+router.get('/search', searchCustomers);
+router.get('/:id', getCustomer);
+router.get('/:id/ledger', getCustomerWithLedger);
+router.post('/', createCustomer);
+router.put('/:id', updateCustomer);
+router.delete('/:id', deleteCustomer);
+router.put('/:id/opening-balance', updateOpeningBalance);
 
 module.exports = router;

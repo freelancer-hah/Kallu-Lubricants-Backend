@@ -11,34 +11,26 @@ const productSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
-  costPrice: {
+  currentCostPrice: {
     type: Number,
-    required: true,
-    min: 0
+    default: 0
   },
-  sellingPrice: {
+  currentSellingPrice: {
     type: Number,
-    required: true,
-    min: 0
+    default: 0
   },
   quantity: {
     type: Number,
-    required: true,
-    default: 0,
-    min: 0
+    default: 0
   },
-  unit: {
-    type: String,
-    default: 'piece'
-  }
+  // Price history for tracking
+  priceHistory: [{
+    costPrice: Number,
+    sellingPrice: Number,
+    date: { type: Date, default: Date.now }
+  }]
 }, {
   timestamps: true
 });
-
-// Update selling price method
-productSchema.methods.updateSellingPrice = function(newPrice) {
-  this.sellingPrice = newPrice;
-  return this.save();
-};
 
 module.exports = mongoose.model('Product', productSchema);

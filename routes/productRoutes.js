@@ -24,17 +24,18 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// Create product
+// Create product - ONLY name and company
 router.post('/', auth, async (req, res) => {
   try {
-    const { name, company, costPrice, sellingPrice, quantity } = req.body;
+    const { name, company } = req.body;
     
     const product = new Product({
       name,
       company,
-      costPrice: costPrice || 0,
-      sellingPrice: sellingPrice || 0,
-      quantity: quantity || 0
+      currentCostPrice: 0,
+      currentSellingPrice: 0,
+      quantity: 0,
+      priceHistory: []
     });
     
     await product.save();
@@ -44,18 +45,15 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-// Update product
+// Update product - ONLY name and company
 router.put('/:id', auth, async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
     
-    const { name, company, costPrice, sellingPrice, quantity } = req.body;
+    const { name, company } = req.body;
     if (name) product.name = name;
     if (company) product.company = company;
-    if (costPrice !== undefined) product.costPrice = costPrice;
-    if (sellingPrice !== undefined) product.sellingPrice = sellingPrice;
-    if (quantity !== undefined) product.quantity = quantity;
     
     await product.save();
     res.json(product);

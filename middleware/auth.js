@@ -1,28 +1,26 @@
 const jwt = require('jsonwebtoken');
 
-const auth = async (req, res, next) => {
+const protect = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ message: 'Not authorized, no token' });
+  }
+  
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
-    
-    if (!token) {
-      return res.status(401).json({ message: 'No token, authorization denied' });
-    }
-    
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'kallu_lubricants_secret_key_2024');
     req.user = decoded;
     next();
   } catch (error) {
-    res.status(401).json({ message: 'Token is not valid' });
+    return res.status(401).json({ message: 'Not authorized, token failed' });
   }
 };
 
-// Case-insensitive role check - FIXED
 const adminOnly = (req, res, next) => {
-  const userRole = req.user.role?.toLowerCase();
-  if (userRole !== 'admin') {
-    return res.status(403).json({ message: 'Admin access required' });
+  if (req.user.role !== 'Admin') {
+    return res.status(403).json({ message: 'Access denied. Admin only.' });
   }
   next();
 };
 
-module.exports = { auth, adminOnly };
+module.exports = { auth: protect, adminOnly };

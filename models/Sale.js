@@ -1,5 +1,34 @@
 const mongoose = require('mongoose');
 
+const saleItemSchema = new mongoose.Schema({
+  product: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true
+  },
+  productName: {
+    type: String,
+    required: true
+  },
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1
+  },
+  sellingPrice: {
+    type: Number,
+    required: true
+  },
+  costPrice: {
+    type: Number,
+    required: true
+  },
+  total: {
+    type: Number,
+    required: true
+  }
+});
+
 const saleSchema = new mongoose.Schema({
   invoiceNo: {
     type: String,
@@ -17,34 +46,7 @@ const saleSchema = new mongoose.Schema({
   customerPhone: {
     type: String
   },
-  items: [{
-    product: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Product',
-      required: true
-    },
-    productName: {
-      type: String,
-      required: true
-    },
-    quantity: {
-      type: Number,
-      required: true,
-      min: 1
-    },
-    sellingPrice: {
-      type: Number,
-      required: true
-    },
-    costPrice: {
-      type: Number,
-      required: true
-    },
-    total: {
-      type: Number,
-      required: true
-    }
-  }],
+  items: [saleItemSchema],
   subtotal: {
     type: Number,
     required: true

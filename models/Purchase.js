@@ -5,11 +5,6 @@ const purchaseSchema = new mongoose.Schema({
     type: String,
     unique: true
   },
-  company: {
-    type: String,
-    required: true,
-    trim: true
-  },
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
@@ -19,7 +14,16 @@ const purchaseSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  company: {
+    type: String,
+    required: true
+  },
   costPrice: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  sellingPrice: {
     type: Number,
     required: true,
     min: 0
@@ -32,6 +36,19 @@ const purchaseSchema = new mongoose.Schema({
   totalAmount: {
     type: Number,
     required: true
+  },
+  amountPaid: {
+    type: Number,
+    default: 0
+  },
+  remainingBalance: {
+    type: Number,
+    default: 0
+  },
+  paymentStatus: {
+    type: String,
+    enum: ['paid', 'partial', 'pending'],
+    default: 'pending'
   },
   date: {
     type: Date,

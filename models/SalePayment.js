@@ -18,7 +18,7 @@ const salePaymentSchema = new mongoose.Schema({
   },
   paymentMethod: {
     type: String,
-    enum: ['cash', 'bank_transfer', 'cheque', 'upi'],
+    enum: ['cash', 'bank', 'bank_transfer', 'upi', 'cheque', 'card'],
     default: 'cash'
   },
   date: {

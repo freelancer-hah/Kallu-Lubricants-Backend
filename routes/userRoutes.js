@@ -1,12 +1,33 @@
 const express = require('express');
-const { getUsers, createUser, updateUser, deleteUser } = require('../controllers/userController');
+const router = express.Router();
+const {
+  getUsers,
+  getUser,
+  createUser,
+  updateUser,
+  deleteUser
+} = require('../controllers/userController');
 const { auth, adminOnly } = require('../middleware/auth');
 
-const router = express.Router();
+// All user routes require authentication
+router.use(auth);
 
-router.get('/', auth, adminOnly, getUsers);
-router.post('/', auth, adminOnly, createUser);
-router.put('/:id', auth, adminOnly, updateUser);
-router.delete('/:id', auth, adminOnly, deleteUser);
+// Admin check with better error message
+router.use((req, res, next) => {
+  const userRole = req.user.role?.toLowerCase();
+  if (userRole !== 'admin') {
+    return res.status(403).json({ 
+      message: 'Access denied. Admin privileges required.',
+      yourRole: req.user.role 
+    });
+  }
+  next();
+});
+
+router.get('/', getUsers);
+router.get('/:id', getUser);
+router.post('/', createUser);
+router.put('/:id', updateUser);
+router.delete('/:id', deleteUser);
 
 module.exports = router;
