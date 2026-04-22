@@ -21,7 +21,7 @@ const customerSchema = new mongoose.Schema({
     default: null,
     trim: true
   },
-  // New fields
+  // Accounting fields
   openingBalance: {
     type: Number,
     default: 0
@@ -38,6 +38,25 @@ const customerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Transfer info (only for Type 2 customers)
+  transferredFrom: {
+    type: String,
+    default: null
+  },
+  transferAmount: {
+    type: Number,
+    default: 0
+  },
+  transferDate: {
+    type: Date,
+    default: null
+  },
+  // Customer type
+  customerType: {
+    type: String,
+    enum: ['normal', 'transfer'],
+    default: 'normal'
+  },
   creditLimit: {
     type: Number,
     default: 0
@@ -45,11 +64,8 @@ const customerSchema = new mongoose.Schema({
   gstNumber: {
     type: String
   }
-}, {
-  timestamps: true
-});
+}, { timestamps: true });
 
-// Create index for search
 customerSchema.index({ name: 'text', phone: 'text', shop_name: 'text' });
 
 module.exports = mongoose.model('Customer', customerSchema);

@@ -13,18 +13,13 @@ router.get('/dashboard', auth, async (req, res) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    // Get today's sales (payments received)
     const todaySales = await Sale.find({ date: { $gte: today } });
     const todaySalesAmount = todaySales.reduce((sum, s) => sum + s.amountPaid, 0);
     
-    // Get total customers
     const totalCustomers = await Customer.countDocuments();
-    
-    // Get total products
     const totalProducts = await Product.countDocuments();
     const lowStockProducts = await Product.countDocuments({ quantity: { $lt: 10 } });
     
-    // Get monthly stats (payments received)
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const monthlySales = await Sale.find({ date: { $gte: startOfMonth } });
     const monthlySalesAmount = monthlySales.reduce((sum, s) => sum + s.amountPaid, 0);
@@ -35,7 +30,6 @@ router.get('/dashboard', auth, async (req, res) => {
     const monthlyExpenses = await Expense.find({ date: { $gte: startOfMonth } });
     const monthlyExpenseAmount = monthlyExpenses.reduce((sum, e) => sum + e.amount, 0);
     
-    // Get outstanding dues
     const pendingSales = await Sale.find({ remainingBalance: { $gt: 0 } });
     const totalOutstanding = pendingSales.reduce((sum, s) => sum + s.remainingBalance, 0);
     
@@ -72,7 +66,6 @@ router.get('/product-wise', auth, async (req, res) => {
     
     const sales = await Sale.find(query);
     
-    // Aggregate product-wise sales
     const productSales = {};
     
     for (const sale of sales) {
@@ -119,7 +112,7 @@ router.get('/product-wise', auth, async (req, res) => {
   }
 });
 
-// Get sales report
+// Get sales report - WITH DISCOUNT
 router.get('/sales', auth, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
@@ -133,18 +126,37 @@ router.get('/sales', auth, async (req, res) => {
     }
     
     const sales = await Sale.find(query).populate('customer', 'name phone').sort({ date: -1 });
+    
     const totalSales = sales.reduce((sum, s) => sum + s.totalAmount, 0);
+    const totalDiscount = sales.reduce((sum, s) => sum + (s.discount || 0), 0);
+    const totalSubtotal = sales.reduce((sum, s) => sum + (s.subtotal || s.totalAmount + (s.discount || 0)), 0);
     const totalReceived = sales.reduce((sum, s) => sum + s.amountPaid, 0);
     const totalCost = sales.reduce((sum, s) => {
       const costSum = s.items.reduce((itemSum, item) => itemSum + (item.costPrice * item.quantity), 0);
       return sum + costSum;
     }, 0);
-    const totalProfit = totalReceived - totalCost;
+    const totalProfit = totalSales - totalCost;  // Fixed: Use totalSales, not totalReceived
+    
+    const formattedSales = sales.map(sale => ({
+      _id: sale._id,
+      invoiceNo: sale.invoiceNo,
+      customerName: sale.customerName,
+      customerPhone: sale.customerPhone,
+      subtotal: sale.subtotal || sale.totalAmount + (sale.discount || 0),
+      discount: sale.discount || 0,
+      totalAmount: sale.totalAmount,
+      amountPaid: sale.amountPaid,
+      remainingBalance: sale.remainingBalance,
+      status: sale.status,
+      date: sale.date
+    }));
     
     res.json({
-      sales,
+      sales: formattedSales,
       summary: {
         totalSales,
+        totalDiscount,
+        totalSubtotal,
         totalReceived,
         totalCost,
         totalProfit,
@@ -203,7 +215,6 @@ router.get('/expenses', auth, async (req, res) => {
     const expenses = await Expense.find(query).sort({ date: -1 });
     const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
     
-    // Group by category
     const byCategory = {};
     expenses.forEach(e => {
       if (!byCategory[e.category]) byCategory[e.category] = 0;
@@ -224,7 +235,7 @@ router.get('/expenses', auth, async (req, res) => {
   }
 });
 
-// Get profit & loss report
+// Get profit & loss report - CORRECTED
 router.get('/profit-loss', auth, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
@@ -237,33 +248,84 @@ router.get('/profit-loss', auth, async (req, res) => {
       };
     }
     
-    // Sales data (based on payments received)
-    const sales = await Sale.find(query);
-    const totalSales = sales.reduce((sum, s) => sum + s.totalAmount, 0);
-    const totalReceived = sales.reduce((sum, s) => sum + s.amountPaid, 0);
-    const totalCost = sales.reduce((sum, s) => {
-      const costSum = s.items.reduce((itemSum, item) => itemSum + (item.costPrice * item.quantity), 0);
-      return sum + costSum;
-    }, 0);
-    const grossProfit = totalReceived - totalCost;
+    // Get all sales
+    const sales = await Sale.find(query).populate('customer', 'name');
+    
+    let totalSalesRevenue = 0;      // Total after discount (actual sale amount)
+    let totalSubtotal = 0;          // Total before discount
+    let totalDiscount = 0;           // Total discount given
+    let totalCost = 0;               // Total cost of goods sold
+    
+    const discountDetails = [];
+    
+    for (const sale of sales) {
+      const saleAmount = sale.totalAmount;
+      const discountAmount = sale.discount || 0;
+      const subtotalAmount = sale.subtotal || saleAmount + discountAmount;
+      
+      totalSalesRevenue += saleAmount;
+      totalSubtotal += subtotalAmount;
+      totalDiscount += discountAmount;
+      
+      const costSum = sale.items.reduce((itemSum, item) => itemSum + (item.costPrice * item.quantity), 0);
+      totalCost += costSum;
+      
+      if (discountAmount > 0) {
+        discountDetails.push({
+          invoiceNo: sale.invoiceNo,
+          customerName: sale.customerName,
+          subtotal: subtotalAmount,
+          discount: discountAmount,
+          totalAmount: saleAmount
+        });
+      }
+    }
+    
+    // CORRECT: Gross Profit = Total Sales Revenue - Cost of Goods
+    const grossProfit = totalSalesRevenue - totalCost;
     
     // Expenses
     const expenses = await Expense.find(query);
     const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
     
-    // Purchases (not directly in P&L but for reference)
+    const byCategory = {};
+    expenses.forEach(e => {
+      if (!byCategory[e.category]) byCategory[e.category] = 0;
+      byCategory[e.category] += e.amount;
+    });
+    
+    // CORRECT: Net Profit = Gross Profit - Expenses
+    const netProfit = grossProfit - totalExpenses;
+    const profitMargin = totalSalesRevenue > 0 ? (netProfit / totalSalesRevenue * 100).toFixed(2) : 0;
+    
     const purchases = await Purchase.find(query);
     const totalPurchases = purchases.reduce((sum, p) => sum + p.totalAmount, 0);
     
-    const netProfit = grossProfit - totalExpenses;
+    console.log("========== PROFIT & LOSS CALCULATION ==========");
+    console.log(`Total Sales Revenue (after discount): ₹${totalSalesRevenue}`);
+    console.log(`Total Discount Given: ₹${totalDiscount}`);
+    console.log(`Total Cost of Goods: ₹${totalCost}`);
+    console.log(`Gross Profit: ₹${grossProfit}`);
+    console.log(`Total Expenses: ₹${totalExpenses}`);
+    console.log(`Net Profit: ₹${netProfit}`);
+    console.log(`Profit Margin: ${profitMargin}%`);
+    console.log("==============================================");
     
     res.json({
       period: { startDate, endDate },
-      sales: { total: totalSales, received: totalReceived, cost: totalCost, grossProfit },
-      expenses: { total: totalExpenses },
+      sales: { 
+        total: totalSalesRevenue,
+        subtotal: totalSubtotal,
+        totalDiscount: totalDiscount,
+        netSales: totalSalesRevenue,
+        cost: totalCost, 
+        grossProfit,
+        discountDetails
+      },
+      expenses: { total: totalExpenses, byCategory },
       purchases: { total: totalPurchases },
       netProfit,
-      profitMargin: totalSales > 0 ? (netProfit / totalSales * 100).toFixed(2) : 0
+      profitMargin: parseFloat(profitMargin)
     });
   } catch (error) {
     console.error(error);
@@ -308,8 +370,8 @@ router.get('/stock-summary', auth, async (req, res) => {
   try {
     const products = await Product.find().sort({ name: 1 });
     
-    const totalStockValue = products.reduce((sum, p) => sum + (p.costPrice * p.quantity), 0);
-    const totalSellingValue = products.reduce((sum, p) => sum + (p.sellingPrice * p.quantity), 0);
+    const totalStockValue = products.reduce((sum, p) => sum + (p.currentCostPrice * p.quantity), 0);
+    const totalSellingValue = products.reduce((sum, p) => sum + (p.currentSellingPrice * p.quantity), 0);
     const lowStockProducts = products.filter(p => p.quantity < 10);
     const outOfStock = products.filter(p => p.quantity === 0);
     

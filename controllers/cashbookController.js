@@ -4,17 +4,17 @@ const Customer = require('../models/Customer');
 const Purchase = require('../models/Purchase');
 const Product = require('../models/Product');
 
-// Create cashbook entry
+// Create cashbook entry - Daily cash flow tracker
 const createCashbookEntry = async (data) => {
   try {
     // Get last balance
-    const lastEntry = await Cashbook.findOne({ isDeleted: false }).sort({ createdAt: -1 });
+    const lastEntry = await Cashbook.findOne({ isDeleted: false }).sort({ date: -1, createdAt: -1 });
     let lastBalance = lastEntry ? lastEntry.balance : 0;
     
-    // Calculate new balance
+    // Calculate new balance: Debit (+) = Paisa aaya, Credit (-) = Paisa gaya
     let newBalance = lastBalance;
-    if (data.debit > 0) newBalance += data.debit;   // Paisa aaya
-    if (data.credit > 0) newBalance -= data.credit; // Paisa gaya
+    if (data.debit > 0) newBalance += data.debit;
+    if (data.credit > 0) newBalance -= data.credit;
     
     const entry = new Cashbook({
       transactionId: `CB-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -52,7 +52,7 @@ const addInvestment = async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: `Investment of ₹${amount.toLocaleString()} added successfully`,
+      message: `Investment of ₹${amount.toLocaleString()} added`,
       entry 
     });
   } catch (error) {
@@ -61,11 +61,15 @@ const addInvestment = async (req, res) => {
   }
 };
 
-// Get complete cashbook summary
+// Get cashbook summary
 const getCashbookSummary = async (req, res) => {
   try {
-    // Total cash in hand (all cash transactions)
-    const cashEntries = await Cashbook.find({ isDeleted: false });
+    // Cash in hand = sum of all cash transactions
+    const cashEntries = await Cashbook.find({ 
+      isDeleted: false,
+      paymentMethod: 'cash' 
+    });
+    
     let cashInHand = 0;
     for (const entry of cashEntries) {
       if (entry.debit > 0) cashInHand += entry.debit;
@@ -76,11 +80,11 @@ const getCashbookSummary = async (req, res) => {
     const products = await Product.find();
     const stockValue = products.reduce((sum, p) => sum + (p.currentCostPrice * p.quantity), 0);
     
-    // Total receivable (Customers se lena hai)
+    // Receivable
     const customers = await Customer.find();
     const totalReceivable = customers.reduce((sum, c) => sum + (c.currentBalance > 0 ? c.currentBalance : 0), 0);
     
-    // Total payable (Companies ko dena hai)
+    // Payable
     const purchases = await Purchase.find({ remainingBalance: { $gt: 0 } });
     const totalPayable = purchases.reduce((sum, p) => sum + p.remainingBalance, 0);
     
@@ -88,7 +92,7 @@ const getCashbookSummary = async (req, res) => {
     const bankAccounts = await BankAccount.find({ isActive: true });
     const totalBankBalance = bankAccounts.reduce((sum, acc) => sum + acc.currentBalance, 0);
     
-    // Net Worth = Cash + Bank + Stock + Receivable - Payable
+    // Net Worth
     const netWorth = cashInHand + totalBankBalance + stockValue + totalReceivable - totalPayable;
     
     res.json({
@@ -109,7 +113,7 @@ const getCashbookSummary = async (req, res) => {
   }
 };
 
-// Get cashbook ledger (all transactions)
+// Get cashbook ledger - Date-wise daily cash flow
 const getCashbookLedger = async (req, res) => {
   try {
     const { startDate, endDate, type, paymentMethod } = req.query;
@@ -122,10 +126,18 @@ const getCashbookLedger = async (req, res) => {
     if (paymentMethod) query.paymentMethod = paymentMethod;
     
     const transactions = await Cashbook.find(query)
-      .sort({ date: -1 })
+      .sort({ date: 1, createdAt: 1 })  // Date-wise ascending for running balance
       .populate('bankAccountId', 'accountName bankName');
     
-    res.json(transactions);
+    // Calculate running balance for display
+    let runningBalance = 0;
+    const formattedTransactions = transactions.map(txn => {
+      if (txn.debit > 0) runningBalance += txn.debit;
+      if (txn.credit > 0) runningBalance -= txn.credit;
+      return { ...txn.toObject(), runningBalance };
+    }).reverse(); // Latest first
+    
+    res.json(formattedTransactions);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });

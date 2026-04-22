@@ -3,27 +3,32 @@ const router = express.Router();
 const {
   getCustomers,
   getCustomer,
+  getCustomerCompleteDetails,
   searchCustomers,
-  createCustomer,
+  addNormalCustomer,
+  addTransferCustomer,
   updateCustomer,
   deleteCustomer,
-  getCustomerWithLedger,
-  updateOpeningBalance
+  getCustomerWithLedger
 } = require('../controllers/customerController');
 
-// Import auth middleware correctly - destructure the object
-const { auth, adminOnly } = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 
-// All customer routes require authentication
 router.use(auth);
 
+// GET routes
 router.get('/', getCustomers);
 router.get('/search', searchCustomers);
 router.get('/:id', getCustomer);
+router.get('/:id/complete', getCustomerCompleteDetails);
 router.get('/:id/ledger', getCustomerWithLedger);
-router.post('/', createCustomer);
+
+// POST routes - 2 types of customers
+router.post('/normal', addNormalCustomer);      // TYPE 1: Normal customer (zero balance)
+router.post('/transfer', addTransferCustomer);   // TYPE 2: Transfer customer (with balance)
+
+// PUT/DELETE routes
 router.put('/:id', updateCustomer);
 router.delete('/:id', deleteCustomer);
-router.put('/:id/opening-balance', updateOpeningBalance);
 
 module.exports = router;
