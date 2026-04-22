@@ -8,8 +8,12 @@ dotenv.config();
 const app = express();
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: 'https://splendorous-kitten-8d531d.netlify.app',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));app.use(express.json());
 
 // Import all routes
 const authRoutes = require('./routes/authRoutes');
