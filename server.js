@@ -7,13 +7,34 @@ dotenv.config();
 
 const app = express();
 
-// Middleware
+// Middleware - CORS configuration for multiple origins
+const allowedOrigins = [
+  'https://splendorous-kitten-8d531d.netlify.app',
+  'http://localhost:8080',
+  'http://localhost:3000' // If you use React default port
+];
+
 app.use(cors({
-  origin: 'https://splendorous-kitten-8d531d.netlify.app',
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('Blocked origin:', origin);
+      callback(null, false); // Change to false to block, or use callback(new Error('Not allowed by CORS'))
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
-}));app.use(express.json());
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
+app.use(express.json());
 
 // Import all routes
 const authRoutes = require('./routes/authRoutes');
@@ -106,4 +127,6 @@ const PORT = process.env.PORT || 5000 || process.env.HOS;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 API URL: http://localhost:${PORT}/api`);
+  console.log(`🌐 Allowed CORS origins:`);
+  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
 });

@@ -5,7 +5,7 @@ const BankAccount = require('../models/BankAccount');
 const Sale = require('../models/Sale');
 const { createCashbookEntry } = require('./cashbookController');
 
-// Get customer ledger with dynamic balance
+// Get customer ledger with CORRECT dynamic balance
 const getCustomerLedger = async (req, res) => {
   try {
     const { customerId, startDate, endDate } = req.query;
@@ -20,21 +20,20 @@ const getCustomerLedger = async (req, res) => {
       .sort({ date: 1, createdAt: 1 });
     
     let customer = null;
-    let openingBalance = 0;
     
     if (customerId) {
       customer = await Customer.findById(customerId);
-      if (customer) {
-        openingBalance = customer.openingBalance || 0;
-      }
     }
     
-    let runningBalance = openingBalance;
-    const formattedLedger = ledger.map(entry => {
+    // Calculate running balance dynamically (start from 0)
+    let runningBalance = 0;
+    const formattedLedger = [];
+    
+    for (const entry of ledger) {
       if (entry.debit > 0) runningBalance += entry.debit;
       if (entry.credit > 0) runningBalance -= entry.credit;
       
-      return {
+      formattedLedger.push({
         _id: entry._id,
         date: entry.date,
         transactionType: entry.transactionType,
@@ -43,33 +42,39 @@ const getCustomerLedger = async (req, res) => {
         debit: entry.debit,
         credit: entry.credit,
         balance: runningBalance
-      };
-    }).reverse();
+      });
+    }
     
     let customerSummary = null;
+    let currentBalance = runningBalance;
+    
     if (customer) {
+      if (customer.currentBalance !== currentBalance) {
+        customer.currentBalance = currentBalance;
+        await customer.save();
+      }
+      
       customerSummary = {
         name: customer.name,
         phone: customer.phone,
         openingBalance: customer.openingBalance || 0,
         totalPurchases: customer.totalPurchases || 0,
         totalPayments: customer.totalPayments || 0,
-        currentBalance: customer.currentBalance || 0
+        currentBalance: currentBalance
       };
     }
     
-    const finalBalance = openingBalance + 
-      ledger.reduce((sum, l) => sum + l.debit, 0) - 
-      ledger.reduce((sum, l) => sum + l.credit, 0);
+    const totalDebit = ledger.reduce((sum, l) => sum + l.debit, 0);
+    const totalCredit = ledger.reduce((sum, l) => sum + l.credit, 0);
     
     res.json({
       customer: customerSummary,
       transactions: formattedLedger,
       summary: {
-        openingBalance: openingBalance,
-        totalDebit: ledger.reduce((sum, l) => sum + l.debit, 0),
-        totalCredit: ledger.reduce((sum, l) => sum + l.credit, 0),
-        closingBalance: finalBalance
+        openingBalance: customer?.openingBalance || 0,
+        totalDebit: totalDebit,
+        totalCredit: totalCredit,
+        closingBalance: currentBalance
       }
     });
   } catch (error) {
@@ -78,7 +83,7 @@ const getCustomerLedger = async (req, res) => {
   }
 };
 
-// Create customer ledger entry
+// Create customer ledger entry (without storing balance field)
 const createCustomerLedgerEntry = async (data) => {
   try {
     console.log(`========== LEDGER ENTRY ==========`);
@@ -89,16 +94,25 @@ const createCustomerLedgerEntry = async (data) => {
     console.log(`==================================`);
     
     const entry = new CustomerLedger({
-      ...data
+      customerId: data.customerId,
+      customerName: data.customerName,
+      date: data.date,
+      transactionType: data.transactionType,
+      referenceNo: data.referenceNo,
+      description: data.description,
+      debit: data.debit,
+      credit: data.credit,
+      createdBy: data.createdBy
     });
     
     await entry.save();
     
+    // Update customer currentBalance by summing ALL ledger entries
     const customer = await Customer.findById(data.customerId);
     if (customer) {
       const allEntries = await CustomerLedger.find({ customerId: data.customerId });
       
-      let newBalance = customer.openingBalance || 0;
+      let newBalance = 0;
       for (const e of allEntries) {
         if (e.debit > 0) newBalance += e.debit;
         if (e.credit > 0) newBalance -= e.credit;
@@ -123,64 +137,54 @@ const createCustomerLedgerEntry = async (data) => {
   }
 };
 
-// UPDATE SALE STATUS AFTER PAYMENT - Called from recordCustomerPayment
+// UPDATE SALE STATUS AFTER PAYMENT
 const updateSaleStatusAfterPayment = async (customerId, amount) => {
   try {
     console.log(`========== UPDATING SALE STATUS ==========`);
     console.log(`Customer ID: ${customerId}`);
     console.log(`Payment Amount: ${amount}`);
     
-    // Find all pending/partial sales for this customer (oldest first)
     const sales = await Sale.find({ 
       customer: customerId,
       remainingBalance: { $gt: 0 }
     }).sort({ date: 1 });
-    
-    console.log(`Found ${sales.length} pending/partial sales`);
     
     let remainingAmount = amount;
     
     for (const sale of sales) {
       if (remainingAmount <= 0) break;
       
-      console.log(`Processing sale ${sale.invoiceNo}: remainingBalance=${sale.remainingBalance}, remainingAmount=${remainingAmount}`);
-      
       if (remainingAmount >= sale.remainingBalance) {
-        // Full payment for this sale
         const paidAmount = sale.remainingBalance;
         remainingAmount -= paidAmount;
         sale.amountPaid += paidAmount;
         sale.remainingBalance = 0;
         sale.status = 'paid';
-        console.log(`✅ Sale ${sale.invoiceNo} FULLY PAID, status: ${sale.status}`);
+        console.log(`✅ Sale ${sale.invoiceNo} FULLY PAID`);
       } else {
-        // Partial payment for this sale
         sale.amountPaid += remainingAmount;
         sale.remainingBalance -= remainingAmount;
         sale.status = 'partial';
-        console.log(`⚠️ Sale ${sale.invoiceNo} PARTIALLY PAID, remaining: ${sale.remainingBalance}, status: ${sale.status}`);
+        console.log(`⚠️ Sale ${sale.invoiceNo} PARTIALLY PAID, remaining: ${sale.remainingBalance}`);
         remainingAmount = 0;
       }
       
       await sale.save();
     }
-    
-    console.log(`========== SALE STATUS UPDATE COMPLETE ==========`);
   } catch (error) {
     console.error('Error updating sale status:', error);
   }
 };
 
-// RECORD CUSTOMER PAYMENT - FROM CUSTOMERS PAGE
+// RECORD CUSTOMER PAYMENT
 const recordCustomerPayment = async (req, res) => {
   try {
     const { customerId, amount, paymentMethod, date, notes, bankAccountId } = req.body;
     
-    console.log(`========== RECORDING PAYMENT FROM CUSTOMERS PAGE ==========`);
+    console.log(`========== RECORDING PAYMENT ==========`);
     console.log(`Customer ID: ${customerId}`);
     console.log(`Amount: ${amount}`);
     console.log(`Payment Method: ${paymentMethod}`);
-    console.log(`Bank Account ID: ${bankAccountId}`);
     
     const customer = await Customer.findById(customerId);
     if (!customer) {
@@ -191,23 +195,23 @@ const recordCustomerPayment = async (req, res) => {
       return res.status(400).json({ message: 'Amount must be greater than 0' });
     }
     
-    // Calculate current balance
+    // Calculate current receivable balance from ledger entries
     const allEntries = await CustomerLedger.find({ customerId });
-    let currentBalance = customer.openingBalance || 0;
+    let currentReceivable = 0;
     for (const entry of allEntries) {
-      if (entry.debit > 0) currentBalance += entry.debit;
-      if (entry.credit > 0) currentBalance -= entry.credit;
+      if (entry.debit > 0) currentReceivable += entry.debit;
+      if (entry.credit > 0) currentReceivable -= entry.credit;
     }
     
-    console.log(`Current customer balance: ${currentBalance}`);
+    console.log(`Current Receivable: ${currentReceivable}`);
     
-    if (amount > currentBalance) {
+    if (amount > currentReceivable) {
       return res.status(400).json({ 
-        message: `Amount exceeds outstanding balance of ₹${currentBalance.toLocaleString()}` 
+        message: `Amount exceeds outstanding receivable of ₹${currentReceivable.toLocaleString()}` 
       });
     }
     
-    // STEP 1: Create customer ledger entry
+    // Create customer ledger entry (Credit)
     await createCustomerLedgerEntry({
       customerId,
       customerName: customer.name,
@@ -220,16 +224,15 @@ const recordCustomerPayment = async (req, res) => {
       createdBy: req.user.id
     });
     
-    // STEP 2: UPDATE SALE STATUS AFTER PAYMENT (CRITICAL FIX)
+    // Update sale status
     await updateSaleStatusAfterPayment(customerId, amount);
     
-    // STEP 3: Cashbook entry based on payment method
+    // Cashbook entry
     if (paymentMethod === 'bank' && bankAccountId) {
       const bankAccount = await BankAccount.findById(bankAccountId);
       if (bankAccount) {
         bankAccount.currentBalance += amount;
         await bankAccount.save();
-        console.log(`Bank account ${bankAccount.bankName} updated, new balance: ${bankAccount.currentBalance}`);
       }
       
       await createCashbookEntry({
@@ -260,20 +263,19 @@ const recordCustomerPayment = async (req, res) => {
     
     // Get updated balance
     const updatedEntries = await CustomerLedger.find({ customerId });
-    let newBalance = customer.openingBalance || 0;
+    let newReceivable = 0;
     for (const entry of updatedEntries) {
-      if (entry.debit > 0) newBalance += entry.debit;
-      if (entry.credit > 0) newBalance -= entry.credit;
+      if (entry.debit > 0) newReceivable += entry.debit;
+      if (entry.credit > 0) newReceivable -= entry.credit;
     }
     
-    console.log(`Payment completed! New customer balance: ${newBalance}`);
-    console.log(`=============================================`);
+    console.log(`Payment completed! New Receivable: ${newReceivable}`);
     
     res.json({ 
       success: true, 
-      message: `Payment of ₹${amount.toLocaleString()} received from ${customer.name}`,
-      oldBalance: currentBalance,
-      newBalance: newBalance
+      message: `Payment of ₹${amount.toLocaleString()} received`,
+      oldReceivable: currentReceivable,
+      newReceivable: newReceivable
     });
   } catch (error) {
     console.error(error);
@@ -314,10 +316,6 @@ const addOpeningBalance = async (req, res) => {
     if (existing) {
       return res.status(400).json({ message: 'Opening balance already added' });
     }
-    
-    customer.openingBalance = amount;
-    customer.currentBalance = amount;
-    await customer.save();
     
     await createCustomerLedgerEntry({
       customerId,

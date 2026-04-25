@@ -31,7 +31,7 @@ const getCustomer = async (req, res) => {
   }
 };
 
-// Get customer complete details with ledger
+// Get customer complete details with ledger - FIXED (No double balance)
 const getCustomerCompleteDetails = async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id);
@@ -40,14 +40,39 @@ const getCustomerCompleteDetails = async (req, res) => {
     }
     
     const ledger = await CustomerLedger.find({ customerId: req.params.id })
-      .sort({ date: 1 });
+      .sort({ date: 1, createdAt: 1 });
     
-    let runningBalance = customer.openingBalance;
-    const formattedLedger = ledger.map(entry => {
+    // Calculate balance from ledger entries ONLY (start from 0)
+    let runningBalance = 0;
+    const formattedLedger = [];
+    
+    for (const entry of ledger) {
       if (entry.debit > 0) runningBalance += entry.debit;
       if (entry.credit > 0) runningBalance -= entry.credit;
-      return { ...entry.toObject(), balance: runningBalance };
-    }).reverse();
+      
+      formattedLedger.push({
+        _id: entry._id,
+        date: entry.date,
+        transactionType: entry.transactionType,
+        referenceNo: entry.referenceNo,
+        description: entry.description,
+        debit: entry.debit,
+        credit: entry.credit,
+        balance: runningBalance
+      });
+    }
+    
+    // Reverse to show latest first
+    formattedLedger.reverse();
+    
+    // Get current balance from ledger calculation
+    const currentBalance = runningBalance;
+    
+    // Update customer current balance if needed
+    if (customer.currentBalance !== currentBalance) {
+      customer.currentBalance = currentBalance;
+      await customer.save();
+    }
     
     res.json({
       customer: {
@@ -56,10 +81,10 @@ const getCustomerCompleteDetails = async (req, res) => {
         phone: customer.phone,
         shop_name: customer.shop_name,
         address: customer.address,
-        openingBalance: customer.openingBalance,
-        totalPurchases: customer.totalPurchases,
-        totalPayments: customer.totalPayments,
-        currentBalance: customer.currentBalance,
+        openingBalance: customer.openingBalance || 0,
+        totalPurchases: customer.totalPurchases || 0,
+        totalPayments: customer.totalPayments || 0,
+        currentBalance: currentBalance,
         customerType: customer.customerType,
         transferredFrom: customer.transferredFrom,
         transferAmount: customer.transferAmount,
@@ -69,7 +94,7 @@ const getCustomerCompleteDetails = async (req, res) => {
       summary: {
         totalDebit: ledger.reduce((sum, l) => sum + l.debit, 0),
         totalCredit: ledger.reduce((sum, l) => sum + l.credit, 0),
-        closingBalance: customer.currentBalance
+        closingBalance: currentBalance
       }
     });
   } catch (error) {
@@ -101,7 +126,7 @@ const searchCustomers = async (req, res) => {
   }
 };
 
-// TYPE 1: NORMAL CUSTOMER (Zero balance)
+// TYPE 1: NORMAL CUSTOMER
 const addNormalCustomer = async (req, res) => {
   try {
     const { name, phone, shop_name, address } = req.body;
@@ -135,7 +160,7 @@ const addNormalCustomer = async (req, res) => {
   }
 };
 
-// TYPE 2: TRANSFER CUSTOMER - FIXED (No double balance)
+// TYPE 2: TRANSFER CUSTOMER - NO CASHBOOK ENTRY
 const addTransferCustomer = async (req, res) => {
   try {
     const {
@@ -145,9 +170,7 @@ const addTransferCustomer = async (req, res) => {
       address,
       oldCompanyName,
       amount,
-      paymentMethod,
       paymentDate,
-      bankAccountId,
       description
     } = req.body;
     
@@ -165,7 +188,7 @@ const addTransferCustomer = async (req, res) => {
     
     const transferAmount = Number(amount);
     
-    // Create customer with opening balance
+    // Create customer
     const customer = new Customer({
       name,
       phone,
@@ -183,7 +206,7 @@ const addTransferCustomer = async (req, res) => {
     
     await customer.save();
     
-    // Create ONLY ONE ledger entry
+    // Create ONLY ONE ledger entry (opening balance)
     const ledgerEntry = new CustomerLedger({
       customerId: customer._id,
       customerName: customer.name,
@@ -198,43 +221,7 @@ const addTransferCustomer = async (req, res) => {
     
     await ledgerEntry.save();
     
-    // Cashbook entry for payment to old company
-    if (paymentMethod === 'bank' && bankAccountId) {
-      const bankAccount = await BankAccount.findById(bankAccountId);
-      if (bankAccount) {
-        if (bankAccount.currentBalance < transferAmount) {
-          await Customer.findByIdAndDelete(customer._id);
-          return res.status(400).json({ 
-            message: `Insufficient balance in ${bankAccount.bankName} account` 
-          });
-        }
-        bankAccount.currentBalance -= transferAmount;
-        await bankAccount.save();
-      }
-      
-      await createCashbookEntry({
-        date: paymentDate || new Date(),
-        type: 'payment_made',
-        partyName: oldCompanyName,
-        description: `Payment to ${oldCompanyName} for taking over customer ${customer.name}`,
-        debit: 0,
-        credit: transferAmount,
-        paymentMethod: 'bank',
-        bankAccountId: bankAccountId,
-        createdBy: req.user.id
-      });
-    } else {
-      await createCashbookEntry({
-        date: paymentDate || new Date(),
-        type: 'payment_made',
-        partyName: oldCompanyName,
-        description: `Payment to ${oldCompanyName} for taking over customer ${customer.name}`,
-        debit: 0,
-        credit: transferAmount,
-        paymentMethod: 'cash',
-        createdBy: req.user.id
-      });
-    }
+    console.log(`Transfer customer added: ${name}, Amount: ${transferAmount}`);
     
     res.status(201).json({
       success: true,

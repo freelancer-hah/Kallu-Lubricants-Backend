@@ -36,7 +36,7 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// Get customer balance/dues
+// Get customer balance
 router.get('/customer/:customerId/balance', auth, async (req, res) => {
   try {
     const sales = await Sale.find({ 
@@ -52,7 +52,7 @@ router.get('/customer/:customerId/balance', auth, async (req, res) => {
   }
 });
 
-// Create sale
+// CREATE SALE - FIXED (No double entry)
 router.post('/', auth, async (req, res) => {
   try {
     const { customer, items, discount, amountPaid, date, notes, paymentMethod } = req.body;
@@ -124,9 +124,10 @@ router.post('/', auth, async (req, res) => {
     
     await sale.save();
     
-    console.log(`Sale created: ${sale.invoiceNo}, status: ${sale.status}, remainingBalance: ${sale.remainingBalance}`);
+    console.log(`Sale created: ${sale.invoiceNo}, Amount: ${totalAmount}`);
     
-    // Create customer ledger entry for sale
+    // ✅ FIXED: ONLY ONE ledger entry for sale (Debit)
+    // Note: createCustomerLedgerEntry already adds to customer.currentBalance
     await createCustomerLedgerEntry({
       customerId: customer,
       customerName: customerData.name,
@@ -151,6 +152,7 @@ router.post('/', auth, async (req, res) => {
       });
       await payment.save();
       
+      // Second ledger entry for payment (Credit)
       await createCustomerLedgerEntry({
         customerId: customer,
         customerName: customerData.name,
@@ -163,6 +165,7 @@ router.post('/', auth, async (req, res) => {
         createdBy: req.user.id
       });
       
+      // Cashbook entry for payment
       await createCashbookEntry({
         date: date || new Date(),
         type: 'payment_received',
@@ -184,7 +187,7 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-// ADD PAYMENT TO SALE - FIXED with status update
+// ADD PAYMENT TO SALE
 router.post('/:saleId/payments', auth, async (req, res) => {
   try {
     const { amount, paymentMethod, bankAccountId, date, notes } = req.body;
@@ -204,7 +207,6 @@ router.post('/:saleId/payments', auth, async (req, res) => {
     sale.amountPaid += amount;
     sale.remainingBalance -= amount;
     
-    // FIXED: Update status based on remaining balance
     if (sale.remainingBalance === 0) {
       sale.status = 'paid';
     } else if (sale.amountPaid > 0) {
@@ -213,9 +215,7 @@ router.post('/:saleId/payments', auth, async (req, res) => {
     
     await sale.save();
     
-    console.log(`Sale ${sale.invoiceNo} updated: status=${sale.status}, remainingBalance=${sale.remainingBalance}`);
-    
-    // Record payment in SalePayment collection
+    // Record payment
     const payment = new SalePayment({
       sale: sale._id,
       customer: sale.customer._id,
@@ -296,19 +296,6 @@ router.delete('/:id', auth, async (req, res) => {
     await sale.deleteOne();
     
     res.json({ success: true, message: 'Sale deleted successfully' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Get payment history for customer
-router.get('/payments/customer/:customerId', auth, async (req, res) => {
-  try {
-    const payments = await SalePayment.find({ customer: req.params.customerId })
-      .populate('sale', 'invoiceNo totalAmount')
-      .sort({ date: -1 });
-    res.json(payments);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });
