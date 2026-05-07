@@ -1,6 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { getCashbookSummary, getCashbookLedger, createCashbookEntry, addInvestment } = require('../controllers/cashbookController');
+const {
+  getCashbookSummary,
+  getCashbookLedger,
+  createCashbookEntry,
+  addInvestment,
+  deleteCashbookEntry,
+  hardDeleteCashbookEntry
+} = require('../controllers/cashbookController');
 const { auth } = require('../middleware/auth');
 
 router.use(auth);
@@ -23,5 +30,9 @@ router.post('/entry', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
+// Delete routes - FIXED
+router.delete('/entry/:id', deleteCashbookEntry);
+router.delete('/entry/:id/permanent', hardDeleteCashbookEntry);
 
 module.exports = router;

@@ -36,14 +36,14 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// Get customer balance
+// Get customer balance/dues
 router.get('/customer/:customerId/balance', auth, async (req, res) => {
   try {
-    const sales = await Sale.find({ 
+    const sales = await Sale.find({
       customer: req.params.customerId,
       remainingBalance: { $gt: 0 }
     });
-    
+
     const totalDue = sales.reduce((sum, sale) => sum + sale.remainingBalance, 0);
     res.json({ totalDue, sales });
   } catch (error) {
@@ -52,39 +52,39 @@ router.get('/customer/:customerId/balance', auth, async (req, res) => {
   }
 });
 
-// CREATE SALE - FIXED (No double entry)
+// CREATE SALE
 router.post('/', auth, async (req, res) => {
   try {
-    const { customer, items, discount, amountPaid, date, notes, paymentMethod } = req.body;
-    
+    const { customer, items, discount, amountPaid, date, notes, paymentMethod, bankAccountId } = req.body;
+
     const customerData = await Customer.findById(customer);
     if (!customerData) {
       return res.status(404).json({ message: 'Customer not found' });
     }
-    
+
     let subtotal = 0;
     let totalCost = 0;
     const saleItems = [];
-    
+
     for (const item of items) {
       const product = await Product.findById(item.product);
       if (!product) {
         return res.status(404).json({ message: `Product not found: ${item.product}` });
       }
-      
+
       if (product.quantity < item.quantity) {
-        return res.status(400).json({ 
-          message: `Insufficient stock for ${product.name}. Available: ${product.quantity}` 
+        return res.status(400).json({
+          message: `Insufficient stock for ${product.name}. Available: ${product.quantity}`
         });
       }
-      
+
       const costPrice = item.costPrice || product.currentCostPrice || 0;
       const sellingPrice = item.sellingPrice || product.currentSellingPrice || 0;
-      
+
       const itemTotal = sellingPrice * item.quantity;
       subtotal += itemTotal;
       totalCost += costPrice * item.quantity;
-      
+
       saleItems.push({
         product: product._id,
         productName: product.name,
@@ -93,20 +93,20 @@ router.post('/', auth, async (req, res) => {
         costPrice: costPrice,
         total: itemTotal
       });
-      
+
       product.quantity -= item.quantity;
       await product.save();
     }
-    
+
     const discountAmount = discount || 0;
     const totalAmount = subtotal - discountAmount;
     const paidAmount = amountPaid || 0;
     const remainingBalance = totalAmount - paidAmount;
-    
+
     let status = 'pending';
     if (remainingBalance === 0) status = 'paid';
     else if (paidAmount > 0) status = 'partial';
-    
+
     const sale = new Sale({
       customer,
       customerName: customerData.name,
@@ -121,13 +121,12 @@ router.post('/', auth, async (req, res) => {
       date: date || new Date(),
       notes
     });
-    
+
     await sale.save();
-    
+
     console.log(`Sale created: ${sale.invoiceNo}, Amount: ${totalAmount}`);
-    
-    // ✅ FIXED: ONLY ONE ledger entry for sale (Debit)
-    // Note: createCustomerLedgerEntry already adds to customer.currentBalance
+
+    // Create customer ledger entry for sale (Debit = Receivable increase)
     await createCustomerLedgerEntry({
       customerId: customer,
       customerName: customerData.name,
@@ -139,7 +138,7 @@ router.post('/', auth, async (req, res) => {
       credit: 0,
       createdBy: req.user.id
     });
-    
+
     // If customer paid at time of sale
     if (paidAmount > 0) {
       const payment = new SalePayment({
@@ -151,8 +150,8 @@ router.post('/', auth, async (req, res) => {
         notes: notes || `Payment for invoice ${sale.invoiceNo}`
       });
       await payment.save();
-      
-      // Second ledger entry for payment (Credit)
+
+      // Customer ledger entry for payment (Credit = Receivable decrease)
       await createCustomerLedgerEntry({
         customerId: customer,
         customerName: customerData.name,
@@ -164,22 +163,46 @@ router.post('/', auth, async (req, res) => {
         credit: paidAmount,
         createdBy: req.user.id
       });
-      
-      // Cashbook entry for payment
-      await createCashbookEntry({
-        date: date || new Date(),
-        type: 'payment_received',
-        referenceId: sale.invoiceNo,
-        partyName: customerData.name,
-        partyId: customer,
-        description: notes || `Payment received for invoice ${sale.invoiceNo}`,
-        debit: paidAmount,
-        credit: 0,
-        paymentMethod: paymentMethod || 'cash',
-        createdBy: req.user.id
-      });
+
+      // Cashbook entry based on payment method
+      if (paymentMethod === 'bank' && bankAccountId) {
+        const bankAccount = await BankAccount.findById(bankAccountId);
+        if (bankAccount) {
+          bankAccount.currentBalance += paidAmount;
+          await bankAccount.save();
+        }
+
+        // Bank payment - No cash entry
+        await createCashbookEntry({
+          date: date || new Date(),
+          type: 'payment_received',
+          referenceId: sale.invoiceNo,
+          partyName: customerData.name,
+          partyId: customer,
+          description: notes || `Payment received for invoice ${sale.invoiceNo} (Bank)`,
+          debit: 0,
+          credit: 0,
+          paymentMethod: 'bank',
+          bankAccountId: bankAccountId,
+          createdBy: req.user.id
+        });
+      } else {
+        // Cash payment - Debit = Cash Aaya
+        await createCashbookEntry({
+          date: date || new Date(),
+          type: 'payment_received',
+          referenceId: sale.invoiceNo,
+          partyName: customerData.name,
+          partyId: customer,
+          description: notes || `Payment received for invoice ${sale.invoiceNo} (Cash)`,
+          debit: paidAmount,
+          credit: 0,
+          paymentMethod: 'cash',
+          createdBy: req.user.id
+        });
+      }
     }
-    
+
     res.status(201).json(sale);
   } catch (error) {
     console.error(error);
@@ -192,30 +215,32 @@ router.post('/:saleId/payments', auth, async (req, res) => {
   try {
     const { amount, paymentMethod, bankAccountId, date, notes } = req.body;
     const sale = await Sale.findById(req.params.saleId).populate('customer', 'name');
-    
+
     if (!sale) {
       return res.status(404).json({ message: 'Sale not found' });
     }
-    
+
     if (amount > sale.remainingBalance) {
-      return res.status(400).json({ 
-        message: `Payment amount exceeds remaining balance of ₹${sale.remainingBalance.toLocaleString()}` 
+      return res.status(400).json({
+        message: `Payment amount exceeds remaining balance of ₹${sale.remainingBalance.toLocaleString()}`
       });
     }
-    
+
     // Update sale
     sale.amountPaid += amount;
     sale.remainingBalance -= amount;
-    
+
     if (sale.remainingBalance === 0) {
       sale.status = 'paid';
     } else if (sale.amountPaid > 0) {
       sale.status = 'partial';
     }
-    
+
     await sale.save();
-    
-    // Record payment
+
+    console.log(`Sale ${sale.invoiceNo} updated: status=${sale.status}, remainingBalance=${sale.remainingBalance}`);
+
+    // Record payment in SalePayment collection
     const payment = new SalePayment({
       sale: sale._id,
       customer: sale.customer._id,
@@ -225,7 +250,7 @@ router.post('/:saleId/payments', auth, async (req, res) => {
       notes
     });
     await payment.save();
-    
+
     // Customer ledger entry for payment
     await createCustomerLedgerEntry({
       customerId: sale.customer._id,
@@ -238,7 +263,7 @@ router.post('/:saleId/payments', auth, async (req, res) => {
       credit: amount,
       createdBy: req.user.id
     });
-    
+
     // Cashbook entry based on payment method
     if (paymentMethod === 'bank' && bankAccountId) {
       const bankAccount = await BankAccount.findById(bankAccountId);
@@ -246,25 +271,40 @@ router.post('/:saleId/payments', auth, async (req, res) => {
         bankAccount.currentBalance += amount;
         await bankAccount.save();
       }
+
+      // Bank payment - No cash entry
+      await createCashbookEntry({
+        date: date || new Date(),
+        type: 'payment_received',
+        referenceId: sale.invoiceNo,
+        partyName: sale.customer.name,
+        partyId: sale.customer._id,
+        description: notes || `Payment received for invoice ${sale.invoiceNo} (Bank)`,
+        debit: 0,
+        credit: 0,
+        paymentMethod: 'bank',
+        bankAccountId: bankAccountId,
+        createdBy: req.user.id
+      });
+    } else {
+      // Cash payment - Debit = Cash Aaya
+      await createCashbookEntry({
+        date: date || new Date(),
+        type: 'payment_received',
+        referenceId: sale.invoiceNo,
+        partyName: sale.customer.name,
+        partyId: sale.customer._id,
+        description: notes || `Payment received for invoice ${sale.invoiceNo} (Cash)`,
+        debit: amount,
+        credit: 0,
+        paymentMethod: 'cash',
+        createdBy: req.user.id
+      });
     }
-    
-    await createCashbookEntry({
-      date: date || new Date(),
-      type: 'payment_received',
-      referenceId: sale.invoiceNo,
-      partyName: sale.customer.name,
-      partyId: sale.customer._id,
-      description: notes || `Payment received for invoice ${sale.invoiceNo}`,
-      debit: amount,
-      credit: 0,
-      paymentMethod: paymentMethod || 'cash',
-      bankAccountId: paymentMethod === 'bank' ? bankAccountId : null,
-      createdBy: req.user.id
-    });
-    
-    res.status(201).json({ 
+
+    res.status(201).json({
       success: true,
-      sale, 
+      sale,
       payment,
       remainingBalance: sale.remainingBalance,
       status: sale.status
@@ -275,27 +315,52 @@ router.post('/:saleId/payments', auth, async (req, res) => {
   }
 });
 
-// Delete sale
+// DELETE SALE
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const sale = await Sale.findById(req.params.id);
+    const sale = await Sale.findById(req.params.id).populate('customer', 'name');
     if (!sale) {
       return res.status(404).json({ message: 'Sale not found' });
     }
-    
-    // Restore stock
+
+    console.log(`========== DELETING SALE ${sale.invoiceNo} ==========`);
+
+    // Restore product stock
     for (const item of sale.items) {
       const product = await Product.findById(item.product);
       if (product) {
         product.quantity += item.quantity;
         await product.save();
+        console.log(`Stock restored for ${product.name}: +${item.quantity}`);
       }
     }
-    
+
+    // Delete all payments
     await SalePayment.deleteMany({ sale: sale._id });
+
+    // Delete the sale
     await sale.deleteOne();
-    
-    res.json({ success: true, message: 'Sale deleted successfully' });
+
+    console.log(`Sale ${sale.invoiceNo} deleted successfully`);
+    console.log(`=============================================`);
+
+    res.json({
+      success: true,
+      message: `Sale ${sale.invoiceNo} deleted. Stock restored.`
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get payment history for customer
+router.get('/payments/customer/:customerId', auth, async (req, res) => {
+  try {
+    const payments = await SalePayment.find({ customer: req.params.customerId })
+      .populate('sale', 'invoiceNo totalAmount')
+      .sort({ date: -1 });
+    res.json(payments);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });

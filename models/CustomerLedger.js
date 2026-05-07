@@ -16,7 +16,7 @@ const customerLedgerSchema = new mongoose.Schema({
   },
   transactionType: {
     type: String,
-    enum: ['opening_balance', 'sale', 'payment_received'],
+    enum: ['opening_balance', 'sale', 'payment_received', 'sale_reversal', 'payment_reversal'],
     required: true
   },
   referenceNo: {
@@ -41,5 +41,6 @@ const customerLedgerSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 customerLedgerSchema.index({ customerId: 1, date: -1 });
+customerLedgerSchema.index({ referenceNo: 1 });
 
 module.exports = mongoose.model('CustomerLedger', customerLedgerSchema);
