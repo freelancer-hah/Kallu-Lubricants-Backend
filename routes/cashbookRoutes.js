@@ -31,7 +31,7 @@ router.post('/entry', async (req, res) => {
   }
 });
 
-// Delete routes - FIXED
+// Delete routes
 router.delete('/entry/:id', deleteCashbookEntry);
 router.delete('/entry/:id/permanent', hardDeleteCashbookEntry);
 
