@@ -19,9 +19,15 @@ const saleItemSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  // ✅ Store actual cost price at time of sale (weighted average)
   costPrice: {
     type: Number,
     required: true
+  },
+  // ✅ Store weighted average cost at time of sale
+  weightedAverageCost: {
+    type: Number,
+    default: 0
   },
   total: {
     type: Number,
