@@ -5,9 +5,16 @@ const SalePayment = require('../models/SalePayment');
 const Product = require('../models/Product');
 const Customer = require('../models/Customer');
 const BankAccount = require('../models/BankAccount');
+const Cashbook = require('../models/Cashbook');
+const CustomerLedger = require('../models/CustomerLedger');
 const { auth } = require('../middleware/auth');
 const { createCashbookEntry } = require('../controllers/cashbookController');
 const { createCustomerLedgerEntry } = require('../controllers/customerLedgerController');
+
+// Helper function to round to 2 decimal places
+const roundToTwo = (num) => {
+  return Math.round(num * 100) / 100;
+};
 
 // Get all sales
 router.get('/', auth, async (req, res) => {
@@ -52,7 +59,7 @@ router.get('/customer/:customerId/balance', auth, async (req, res) => {
   }
 });
 
-// CREATE SALE
+// ✅ CREATE SALE - WITH WEIGHTED AVERAGE COST
 router.post('/', auth, async (req, res) => {
   try {
     const { customer, items, discount, amountPaid, date, notes, paymentMethod, bankAccountId } = req.body;
@@ -78,24 +85,37 @@ router.post('/', auth, async (req, res) => {
         });
       }
 
-      const costPrice = item.costPrice || product.currentCostPrice || 0;
+      // ✅ Get the weighted average cost for this product
+      const weightedAvgCost = product.weightedAverageCost || 0;
       const sellingPrice = item.sellingPrice || product.currentSellingPrice || 0;
 
       const itemTotal = sellingPrice * item.quantity;
       subtotal += itemTotal;
-      totalCost += costPrice * item.quantity;
+      
+      // ✅ Calculate cost using weighted average
+      const costOfGoodsSold = weightedAvgCost * item.quantity;
+      totalCost += costOfGoodsSold;
+
+      // ✅ Reduce stock using the reduceStock method
+      const costUsed = product.reduceStock(item.quantity);
+      await product.save();
 
       saleItems.push({
         product: product._id,
         productName: product.name,
         quantity: item.quantity,
         sellingPrice: sellingPrice,
-        costPrice: costPrice,
+        costPrice: weightedAvgCost, // Store the weighted average cost
+        weightedAverageCost: weightedAvgCost,
         total: itemTotal
       });
 
-      product.quantity -= item.quantity;
-      await product.save();
+      console.log(`📊 Sale Item: ${product.name}`);
+      console.log(`   Quantity: ${item.quantity}`);
+      console.log(`   Weighted Avg Cost: ${weightedAvgCost.toFixed(2)}`);
+      console.log(`   Cost of Goods Sold: ${costOfGoodsSold.toFixed(2)}`);
+      console.log(`   Selling Price: ${sellingPrice}`);
+      console.log(`   Profit: ${(sellingPrice - weightedAvgCost) * item.quantity}`);
     }
 
     const discountAmount = discount || 0;
@@ -124,9 +144,12 @@ router.post('/', auth, async (req, res) => {
 
     await sale.save();
 
-    console.log(`Sale created: ${sale.invoiceNo}, Amount: ${totalAmount}`);
+    console.log(`✅ Sale created: ${sale.invoiceNo}`);
+    console.log(`   Total Amount: ${totalAmount}`);
+    console.log(`   Total Cost: ${totalCost}`);
+    console.log(`   Gross Profit: ${totalAmount - totalCost}`);
 
-    // Create customer ledger entry for sale (Debit = Receivable increase)
+    // Create customer ledger entry for sale
     await createCustomerLedgerEntry({
       customerId: customer,
       customerName: customerData.name,
@@ -151,7 +174,6 @@ router.post('/', auth, async (req, res) => {
       });
       await payment.save();
 
-      // Customer ledger entry for payment (Credit = Receivable decrease)
       await createCustomerLedgerEntry({
         customerId: customer,
         customerName: customerData.name,
@@ -164,15 +186,13 @@ router.post('/', auth, async (req, res) => {
         createdBy: req.user.id
       });
 
-      // Cashbook entry based on payment method
       if (paymentMethod === 'bank' && bankAccountId) {
         const bankAccount = await BankAccount.findById(bankAccountId);
         if (bankAccount) {
-          bankAccount.currentBalance += paidAmount;
+          bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance + paidAmount);
           await bankAccount.save();
         }
 
-        // Bank payment - No cash entry
         await createCashbookEntry({
           date: date || new Date(),
           type: 'payment_received',
@@ -180,14 +200,13 @@ router.post('/', auth, async (req, res) => {
           partyName: customerData.name,
           partyId: customer,
           description: notes || `Payment received for invoice ${sale.invoiceNo} (Bank)`,
-          debit: 0,
+          debit: paidAmount,
           credit: 0,
           paymentMethod: 'bank',
           bankAccountId: bankAccountId,
           createdBy: req.user.id
         });
       } else {
-        // Cash payment - Debit = Cash Aaya
         await createCashbookEntry({
           date: date || new Date(),
           type: 'payment_received',
@@ -222,25 +241,15 @@ router.post('/:saleId/payments', auth, async (req, res) => {
 
     if (amount > sale.remainingBalance) {
       return res.status(400).json({
-        message: `Payment amount exceeds remaining balance of ₹${sale.remainingBalance.toLocaleString()}`
+        message: `Payment amount exceeds remaining balance of PKR ${sale.remainingBalance.toLocaleString()}`
       });
     }
 
-    // Update sale
-    sale.amountPaid += amount;
-    sale.remainingBalance -= amount;
-
-    if (sale.remainingBalance === 0) {
-      sale.status = 'paid';
-    } else if (sale.amountPaid > 0) {
-      sale.status = 'partial';
-    }
-
+    sale.amountPaid = roundToTwo(sale.amountPaid + amount);
+    sale.remainingBalance = roundToTwo(sale.remainingBalance - amount);
+    sale.status = sale.remainingBalance === 0 ? 'paid' : 'partial';
     await sale.save();
 
-    console.log(`Sale ${sale.invoiceNo} updated: status=${sale.status}, remainingBalance=${sale.remainingBalance}`);
-
-    // Record payment in SalePayment collection
     const payment = new SalePayment({
       sale: sale._id,
       customer: sale.customer._id,
@@ -251,7 +260,6 @@ router.post('/:saleId/payments', auth, async (req, res) => {
     });
     await payment.save();
 
-    // Customer ledger entry for payment
     await createCustomerLedgerEntry({
       customerId: sale.customer._id,
       customerName: sale.customer.name,
@@ -264,15 +272,13 @@ router.post('/:saleId/payments', auth, async (req, res) => {
       createdBy: req.user.id
     });
 
-    // Cashbook entry based on payment method
     if (paymentMethod === 'bank' && bankAccountId) {
       const bankAccount = await BankAccount.findById(bankAccountId);
       if (bankAccount) {
-        bankAccount.currentBalance += amount;
+        bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance + amount);
         await bankAccount.save();
       }
 
-      // Bank payment - No cash entry
       await createCashbookEntry({
         date: date || new Date(),
         type: 'payment_received',
@@ -280,14 +286,13 @@ router.post('/:saleId/payments', auth, async (req, res) => {
         partyName: sale.customer.name,
         partyId: sale.customer._id,
         description: notes || `Payment received for invoice ${sale.invoiceNo} (Bank)`,
-        debit: 0,
+        debit: amount,
         credit: 0,
         paymentMethod: 'bank',
         bankAccountId: bankAccountId,
         createdBy: req.user.id
       });
     } else {
-      // Cash payment - Debit = Cash Aaya
       await createCashbookEntry({
         date: date || new Date(),
         type: 'payment_received',
@@ -302,20 +307,14 @@ router.post('/:saleId/payments', auth, async (req, res) => {
       });
     }
 
-    res.status(201).json({
-      success: true,
-      sale,
-      payment,
-      remainingBalance: sale.remainingBalance,
-      status: sale.status
-    });
+    res.status(201).json({ success: true, sale, remainingBalance: sale.remainingBalance });
   } catch (error) {
     console.error(error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// DELETE SALE
+// ✅ DELETE SALE - WITH WEIGHTED AVERAGE REVERSAL
 router.delete('/:id', auth, async (req, res) => {
   try {
     const sale = await Sale.findById(req.params.id).populate('customer', 'name');
@@ -325,20 +324,82 @@ router.delete('/:id', auth, async (req, res) => {
 
     console.log(`========== DELETING SALE ${sale.invoiceNo} ==========`);
 
-    // Restore product stock
+    // STEP 1: Restore product stock and recalculate weighted average
     for (const item of sale.items) {
       const product = await Product.findById(item.product);
       if (product) {
-        product.quantity += item.quantity;
+        // Restore stock with the cost price from the sale
+        const restoreCost = item.costPrice || item.weightedAverageCost || 0;
+        const restoreValue = restoreCost * item.quantity;
+        
+        // Add back to inventory
+        const newTotalValue = product.totalInventoryValue + restoreValue;
+        const newQuantity = product.quantity + item.quantity;
+        const newWeightedAvg = newQuantity > 0 ? newTotalValue / newQuantity : 0;
+        
+        product.quantity = newQuantity;
+        product.totalInventoryValue = newTotalValue;
+        product.weightedAverageCost = newWeightedAvg;
+        
         await product.save();
-        console.log(`Stock restored for ${product.name}: +${item.quantity}`);
+        console.log(`Stock restored for ${product.name}: +${item.quantity} units`);
+        console.log(`New Weighted Average: ${newWeightedAvg.toFixed(2)}`);
       }
     }
 
-    // Delete all payments
+    // STEP 2: Reverse customer ledger entries
+    await createCustomerLedgerEntry({
+      customerId: sale.customer._id,
+      customerName: sale.customerName,
+      date: new Date(),
+      transactionType: 'sale_reversal',
+      referenceNo: `DEL-${sale.invoiceNo}`,
+      description: `Sale reversal - Invoice ${sale.invoiceNo} deleted`,
+      debit: 0,
+      credit: sale.totalAmount,
+      createdBy: req.user.id
+    });
+
+    // STEP 3: Reverse payment if any payment was made
+    if (sale.amountPaid > 0) {
+      await createCustomerLedgerEntry({
+        customerId: sale.customer._id,
+        customerName: sale.customerName,
+        date: new Date(),
+        transactionType: 'payment_reversal',
+        referenceNo: `DEL-${sale.invoiceNo}`,
+        description: `Payment reversal - Invoice ${sale.invoiceNo} deleted`,
+        debit: sale.amountPaid,
+        credit: 0,
+        createdBy: req.user.id
+      });
+
+      const cashEntry = await Cashbook.findOne({
+        referenceId: sale.invoiceNo,
+        type: 'payment_received',
+        isDeleted: false
+      });
+
+      if (cashEntry) {
+        if (cashEntry.paymentMethod === 'bank' && cashEntry.bankAccountId) {
+          const bankAccount = await BankAccount.findById(cashEntry.bankAccountId);
+          if (bankAccount) {
+            bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance - sale.amountPaid);
+            await bankAccount.save();
+            console.log(`Bank balance reversed: -PKR ${sale.amountPaid}`);
+          }
+        }
+
+        cashEntry.isDeleted = true;
+        await cashEntry.save();
+        console.log(`Cashbook entry reversed for sale ${sale.invoiceNo}`);
+      }
+    }
+
+    // STEP 4: Delete all payment records
     await SalePayment.deleteMany({ sale: sale._id });
 
-    // Delete the sale
+    // STEP 5: Delete the sale
     await sale.deleteOne();
 
     console.log(`Sale ${sale.invoiceNo} deleted successfully`);
@@ -346,7 +407,7 @@ router.delete('/:id', auth, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Sale ${sale.invoiceNo} deleted. Stock restored.`
+      message: `Sale ${sale.invoiceNo} deleted. Stock restored, payment reversed.`
     });
   } catch (error) {
     console.error(error);
