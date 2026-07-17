@@ -4,10 +4,15 @@ const Customer = require('../models/Customer');
 const Purchase = require('../models/Purchase');
 const Product = require('../models/Product');
 
+// Helper function to round to 2 decimal places
+const roundToTwo = (num) => {
+  return Math.round(num * 100) / 100;
+};
+
 // Create cashbook entry
 const createCashbookEntry = async (data) => {
   try {
-    const lastEntry = await Cashbook.findOne({ isDeleted: false }).sort({ date: -1, createdAt: -1 });
+    const lastEntry = await Cashbook.findOne({ isDeleted: false }).sort({ date: 1, createdAt: 1 });
     let lastBalance = lastEntry ? lastEntry.balance : 0;
 
     let newBalance = lastBalance;
@@ -17,7 +22,7 @@ const createCashbookEntry = async (data) => {
     const entry = new Cashbook({
       transactionId: `CB-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       ...data,
-      balance: newBalance
+      balance: roundToTwo(newBalance)
     });
 
     await entry.save();
@@ -29,7 +34,7 @@ const createCashbookEntry = async (data) => {
   }
 };
 
-// Add owner investment - WITH PROPER BANK SUPPORT
+// Add owner investment - WITH PROPER DEBIT
 const addInvestment = async (req, res) => {
   try {
     const { amount, description, paymentMethod, date, bankAccountId } = req.body;
@@ -38,30 +43,28 @@ const addInvestment = async (req, res) => {
       return res.status(400).json({ message: 'Please enter a valid amount' });
     }
 
-    const investmentAmount = Number(amount);
+    const investmentAmount = roundToTwo(Number(amount));
 
     if (paymentMethod === 'bank' && bankAccountId) {
-      // Bank Investment - Increase bank balance
       const bankAccount = await BankAccount.findById(bankAccountId);
       if (!bankAccount) {
         return res.status(404).json({ message: 'Bank account not found' });
       }
 
-      // Update bank account balance
-      const oldBankBalance = bankAccount.currentBalance;
-      bankAccount.currentBalance += investmentAmount;
+      // Update bank balance
+      const oldBalance = bankAccount.currentBalance;
+      bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance + investmentAmount);
       await bankAccount.save();
+      console.log(`Bank investment: ${bankAccount.bankName}`);
+      console.log(`Old Balance: ₹${oldBalance}, New Balance: ₹${bankAccount.currentBalance}`);
 
-      console.log(`Bank investment: ${bankAccount.bankName} - ${bankAccount.accountName}`);
-      console.log(`Old Balance: ₹${oldBankBalance}, New Balance: ₹${bankAccount.currentBalance}`);
-
-      // Create cashbook entry for record (no cash impact, only bank)
+      // ✅ FIX: Bank investment should have DEBIT for money coming in
       await createCashbookEntry({
         date: date || new Date(),
         type: 'investment',
         partyName: 'Owner',
-        description: description || `Owner investment of ₹${investmentAmount} (Bank Transfer - ${bankAccount.bankName} - ${bankAccount.accountName})`,
-        debit: 0,
+        description: description || `Investment of PKR ${investmentAmount.toLocaleString()} to ${bankAccount.bankName} - ${bankAccount.accountName}`,
+        debit: investmentAmount,  // ✅ Money came into bank
         credit: 0,
         paymentMethod: 'bank',
         bankAccountId: bankAccountId,
@@ -70,18 +73,12 @@ const addInvestment = async (req, res) => {
 
       res.json({
         success: true,
-        message: `Investment of ₹${investmentAmount.toLocaleString()} added to ${bankAccount.bankName} - ${bankAccount.accountName} account successfully`,
+        message: `Investment of ₹${investmentAmount.toLocaleString()} added to ${bankAccount.bankName} account successfully`,
         type: 'bank',
-        bankAccount: {
-          id: bankAccount._id,
-          name: bankAccount.bankName,
-          accountName: bankAccount.accountName,
-          oldBalance: oldBankBalance,
-          newBalance: bankAccount.currentBalance
-        }
+        newBalance: bankAccount.currentBalance
       });
     } else {
-      // Cash Investment - Increase cash in hand
+      // Cash investment - Debit for cash coming in
       await createCashbookEntry({
         date: date || new Date(),
         type: 'investment',
@@ -108,7 +105,7 @@ const addInvestment = async (req, res) => {
 // Get cashbook summary
 const getCashbookSummary = async (req, res) => {
   try {
-    // Calculate Cash in Hand from ONLY cash transactions
+    // Cash in Hand from cash transactions only
     const cashEntries = await Cashbook.find({
       isDeleted: false,
       paymentMethod: 'cash'
@@ -119,6 +116,7 @@ const getCashbookSummary = async (req, res) => {
       if (entry.debit > 0) cashInHand += entry.debit;
       if (entry.credit > 0) cashInHand -= entry.credit;
     }
+    cashInHand = roundToTwo(cashInHand);
 
     // Stock value
     const products = await Product.find();
@@ -129,7 +127,7 @@ const getCashbookSummary = async (req, res) => {
     const totalReceivable = customers.reduce((sum, c) => sum + (c.currentBalance > 0 ? c.currentBalance : 0), 0);
 
     // Payable to suppliers
-    const purchases = await Purchase.find({ remainingBalance: { $gt: 0 } });
+    const purchases = await Purchase.find({ remainingBalance: { $gt: 0.01 } });
     const totalPayable = purchases.reduce((sum, p) => sum + p.remainingBalance, 0);
 
     // Bank balances
@@ -137,7 +135,13 @@ const getCashbookSummary = async (req, res) => {
     const totalBankBalance = bankAccounts.reduce((sum, acc) => sum + acc.currentBalance, 0);
 
     // Net Worth
-    const netWorth = cashInHand + totalBankBalance + stockValue + totalReceivable - totalPayable;
+    const netWorth = roundToTwo(cashInHand + totalBankBalance + stockValue + totalReceivable - totalPayable);
+
+    // Get recent transactions (not deleted)
+    const recentTransactions = await Cashbook.find({ isDeleted: false })
+      .sort({ date: -1, createdAt: -1 })
+      .limit(20)
+      .populate('bankAccountId', 'accountName bankName');
 
     res.json({
       summary: {
@@ -148,14 +152,8 @@ const getCashbookSummary = async (req, res) => {
         totalPayable,
         netWorth
       },
-      bankAccounts: bankAccounts.map(acc => ({
-        _id: acc._id,
-        accountName: acc.accountName,
-        bankName: acc.bankName,
-        accountNumber: acc.accountNumber,
-        currentBalance: acc.currentBalance
-      })),
-      recentTransactions: await Cashbook.find({ isDeleted: false }).sort({ date: -1 }).limit(20)
+      bankAccounts,
+      recentTransactions
     });
   } catch (error) {
     console.error(error);
@@ -163,7 +161,7 @@ const getCashbookSummary = async (req, res) => {
   }
 };
 
-// Get cashbook ledger
+// Get cashbook ledger - FIXED for correct balance calculation
 const getCashbookLedger = async (req, res) => {
   try {
     const { startDate, endDate, type, paymentMethod } = req.query;
@@ -175,18 +173,45 @@ const getCashbookLedger = async (req, res) => {
     if (type) query.type = type;
     if (paymentMethod) query.paymentMethod = paymentMethod;
 
+    // Get entries sorted by date ASCENDING for correct balance calculation
     const transactions = await Cashbook.find(query)
-      .sort({ date: -1, createdAt: -1 })
+      .sort({ date: 1, createdAt: 1 })
       .populate('bankAccountId', 'accountName bankName');
 
-    res.json(transactions);
+    // Calculate running balance
+    let runningBalance = 0;
+    const formattedTransactions = [];
+
+    for (const entry of transactions) {
+      if (entry.debit > 0) runningBalance += entry.debit;
+      if (entry.credit > 0) runningBalance -= entry.credit;
+      runningBalance = roundToTwo(runningBalance);
+
+      formattedTransactions.push({
+        _id: entry._id,
+        date: entry.date,
+        transactionId: entry.transactionId,
+        partyName: entry.partyName,
+        description: entry.description,
+        type: entry.type,
+        paymentMethod: entry.paymentMethod,
+        debit: entry.debit,
+        credit: entry.credit,
+        balance: runningBalance
+      });
+    }
+
+    // Reverse to show latest first in UI
+    formattedTransactions.reverse();
+
+    res.json(formattedTransactions);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });
   }
 };
 
-// DELETE CASHBOOK ENTRY - FIXED for Bank Investment
+// Delete cashbook entry
 const deleteCashbookEntry = async (req, res) => {
   try {
     const { id } = req.params;
@@ -198,72 +223,39 @@ const deleteCashbookEntry = async (req, res) => {
 
     console.log(`========== DELETING CASHBOOK ENTRY ==========`);
     console.log(`Transaction ID: ${entry.transactionId}`);
-    console.log(`Type: ${entry.type}`);
     console.log(`Payment Method: ${entry.paymentMethod}`);
     console.log(`Debit: ${entry.debit}, Credit: ${entry.credit}`);
 
-    // Reverse effect on bank account if it was a bank transaction
     if (entry.paymentMethod === 'bank' && entry.bankAccountId) {
       const bankAccount = await BankAccount.findById(entry.bankAccountId);
       if (bankAccount) {
-        // For bank investment: entry.debit = 0, entry.credit = 0
-        // We need to reverse the bank balance increase
-        // Since we don't store the amount in debit/credit for bank transactions,
-        // we need to get the amount from description or find the original investment amount
-
-        // Parse amount from description
-        let investmentAmount = 0;
-        const amountMatch = entry.description.match(/₹([\d,]+)/);
-        if (amountMatch) {
-          investmentAmount = parseInt(amountMatch[1].replace(/,/g, ''));
+        if (entry.debit > 0) {
+          // Was an incoming transaction (investment) - reverse it
+          bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance - entry.debit);
+          console.log(`Bank balance reversed: -₹${entry.debit}`);
+        } else if (entry.credit > 0) {
+          // Was an outgoing transaction (payment) - reverse it
+          bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance + entry.credit);
+          console.log(`Bank balance reversed: +₹${entry.credit}`);
         }
-
-        if (investmentAmount > 0) {
-          // Reverse the bank balance (subtract the invested amount)
-          const oldBalance = bankAccount.currentBalance;
-          bankAccount.currentBalance -= investmentAmount;
-          await bankAccount.save();
-          console.log(`Bank account reversed: ${bankAccount.bankName}`);
-          console.log(`Old Balance: ₹${oldBalance}, New Balance: ₹${bankAccount.currentBalance}`);
-          console.log(`Amount reversed: ₹${investmentAmount}`);
-        }
+        await bankAccount.save();
+        console.log(`New bank balance: ₹${bankAccount.currentBalance}`);
       }
     }
 
-    // For cash transactions, reverse cash effect
-    if (entry.paymentMethod === 'cash' && entry.debit > 0) {
-      // Cash investment - cash should decrease
-      console.log(`Cash investment deletion: Need to reverse cash effect`);
-    }
-
-    if (entry.paymentMethod === 'cash' && entry.credit > 0) {
-      // Cash payment - cash should increase
-      console.log(`Cash payment deletion: Need to reverse cash effect`);
-    }
-
-    // Soft delete
     entry.isDeleted = true;
     await entry.save();
 
     console.log(`Entry deleted successfully`);
     console.log(`=============================================`);
 
-    res.json({
-      success: true,
-      message: 'Cashbook entry deleted successfully',
-      entry: {
-        id: entry._id,
-        transactionId: entry.transactionId,
-        type: entry.type
-      }
-    });
+    res.json({ success: true, message: 'Cashbook entry deleted successfully' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });
   }
 };
 
-// HARD DELETE CASHBOOK ENTRY - FIXED for Bank Investment
 const hardDeleteCashbookEntry = async (req, res) => {
   try {
     const { id } = req.params;
@@ -273,42 +265,21 @@ const hardDeleteCashbookEntry = async (req, res) => {
       return res.status(404).json({ message: 'Cashbook entry not found' });
     }
 
-    console.log(`========== PERMANENTLY DELETING CASHBOOK ENTRY ==========`);
-    console.log(`Transaction ID: ${entry.transactionId}`);
-    console.log(`Type: ${entry.type}`);
-    console.log(`Payment Method: ${entry.paymentMethod}`);
-
-    // Reverse effect on bank account if it was a bank transaction
     if (entry.paymentMethod === 'bank' && entry.bankAccountId) {
       const bankAccount = await BankAccount.findById(entry.bankAccountId);
       if (bankAccount) {
-        // Parse amount from description
-        let investmentAmount = 0;
-        const amountMatch = entry.description.match(/₹([\d,]+)/);
-        if (amountMatch) {
-          investmentAmount = parseInt(amountMatch[1].replace(/,/g, ''));
+        if (entry.debit > 0) {
+          bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance - entry.debit);
+        } else if (entry.credit > 0) {
+          bankAccount.currentBalance = roundToTwo(bankAccount.currentBalance + entry.credit);
         }
-
-        if (investmentAmount > 0) {
-          // Reverse the bank balance (subtract the invested amount)
-          const oldBalance = bankAccount.currentBalance;
-          bankAccount.currentBalance -= investmentAmount;
-          await bankAccount.save();
-          console.log(`Bank account reversed: ${bankAccount.bankName}`);
-          console.log(`Old Balance: ₹${oldBalance}, New Balance: ₹${bankAccount.currentBalance}`);
-        }
+        await bankAccount.save();
       }
     }
 
     await entry.deleteOne();
 
-    console.log(`Entry permanently deleted`);
-    console.log(`=============================================`);
-
-    res.json({
-      success: true,
-      message: 'Cashbook entry permanently deleted'
-    });
+    res.json({ success: true, message: 'Cashbook entry permanently deleted' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: error.message });
